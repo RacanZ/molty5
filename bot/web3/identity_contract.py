@@ -34,8 +34,7 @@ async def register_identity_onchain(owner_private_key: str) -> int | None:
         tx = registry.functions.register().build_transaction({
             "from": acct.address,
             "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
-            "gas": 200000,
-            "gasPrice": w3.to_wei(1, "gwei")
+            "gas": 200000,"gasPrice": w3.to_wei(1, "gwei")
             "chainId": CROSS_CHAIN_ID,
         })
 
