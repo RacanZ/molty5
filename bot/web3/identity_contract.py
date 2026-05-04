@@ -39,12 +39,12 @@ async def register_identity_onchain(owner_private_key: str) -> int | None:
         )
 
         # Build transaction
-        tx = registry.functions.register().build_transaction({
+       tx = registry.functions.register().build_transaction({
             "from": acct.address,
             "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
             "gas": 200000,
             "chainId": CROSS_CHAIN_ID,
-        })
+       })
 
         signed = w3.eth.account.sign_transaction(tx, owner_private_key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
