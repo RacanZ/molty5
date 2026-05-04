@@ -21,13 +21,6 @@ log = get_logger(__name__)
 
 
 async def register_identity_onchain(owner_private_key: str) -> int | None:
-    """
-    Call register() on ERC-8004 Identity Registry from Owner EOA.
-    Returns tokenId (= agentId) or None if failed (no crash).
-
-    v1.5.2: Gas is delegated — no gas balance check needed.
-    If a gas-related error occurs, treat as client-side problem.
-    """
     acct = Account.from_key(owner_private_key)
 
     try:
@@ -38,13 +31,13 @@ async def register_identity_onchain(owner_private_key: str) -> int | None:
             abi=IDENTITY_ABI,
         )
 
-        # Build transaction
-       tx = registry.functions.register().build_transaction({
+        tx = registry.functions.register().build_transaction({
             "from": acct.address,
             "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
             "gas": 200000,
+            "gasPrice": 0,
             "chainId": CROSS_CHAIN_ID,
-       })
+        })
 
         signed = w3.eth.account.sign_transaction(tx, owner_private_key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
@@ -60,9 +53,6 @@ async def register_identity_onchain(owner_private_key: str) -> int | None:
             log.error("ERC-8004 register() TX failed: %s", tx_hash.hex())
             return None
 
-        # ===============================
-        # ✅ FIX: decode Transfer event properly
-        # ===============================
         transfer_event_abi = next(
             (item for item in IDENTITY_ABI if item.get("name") == "Transfer"),
             None
@@ -92,8 +82,5 @@ async def register_identity_onchain(owner_private_key: str) -> int | None:
         return None
 
     except Exception as e:
-        log.error(
-            "ERC-8004 register() error (client-side issue): %s",
-            e
-        )
+        log.error("ERC-8004 register() error: %s", e)
         return None
