@@ -1,8 +1,10 @@
 """
 Free game join via matchmaking queue.
 POST /join (Long Poll ~15s) → assigned → open WS immediately.
-No extra sleep between retries per free-games.md.
+Compatible with servers WITHOUT /join/status endpoint.
 """
+
+import asyncio
 from bot.api_client import MoltyAPI, APIError
 from bot.utils.logger import get_logger
 
@@ -14,61 +16,69 @@ async def join_free_game(api: MoltyAPI) -> tuple[str, str]:
     Enter free matchmaking queue and wait for assignment.
     Returns (game_id, agent_id) when assigned.
     """
-    # Idempotency guard: check queue status first
-    try:
-        status_resp = await api.get_join_status()
-        if isinstance(status_resp, dict):
-            status = status_resp.get("status", "not_queued")
-            if status == "assigned":
-                gid = status_resp.get("gameId", "")
-                aid = status_resp.get("agentId", "")
-                if gid and aid:
-                    log.info("Already assigned to game: %s", gid)
-                    return gid, aid
-            elif status == "queued":
-                log.info("Already in queue, resuming...")
-    except APIError:
-        pass
 
-    # Queue loop — no extra sleep, server Long Poll throttles (per free-games.md)
     attempt = 0
+
     while True:
         attempt += 1
         log.info("Free queue attempt #%d...", attempt)
 
         try:
             resp = await api.post_join("free")
+
+            # Safety check
             if not isinstance(resp, dict):
                 log.warning("Unexpected join response type: %s", type(resp).__name__)
+                await asyncio.sleep(1)
                 continue
 
             status = resp.get("status", "")
 
+            # ✅ SUCCESS CASE
             if status == "assigned":
-                gid = resp.get("gameId", "")
-                aid = resp.get("agentId", "")
-                if gid and aid:
-                    log.info("✅ Assigned to free game: %s (agent=%s)", gid, aid)
-                    return gid, aid
-                log.warning("Assigned but missing gameId/agentId: %s", resp)
+                game_id = resp.get("gameId", "")
+                agent_id = resp.get("agentId", "")
 
-            if status in ("not_selected", "queued"):
-                log.debug("Queue status: %s — retrying immediately", status)
+                if game_id and agent_id:
+                    log.info("✅ Assigned to free game: %s (agent=%s)", game_id, agent_id)
+                    return game_id, agent_id
+
+                log.warning("Assigned but missing IDs: %s", resp)
+                await asyncio.sleep(1)
                 continue
 
+            # ⏳ STILL QUEUING
+            if status in ("queued", "not_selected", ""):
+                log.debug("Queue status: %s — waiting...", status)
+                continue
+
+            # ⚠️ UNKNOWN RESPONSE
             log.warning("Unexpected queue response: %s", resp)
+            await asyncio.sleep(1)
 
         except APIError as e:
+            # ❌ HARD ERRORS (STOP)
             if e.code == "NO_IDENTITY":
-                log.error("❌ ERC-8004 identity not registered. Cannot join free room.")
+                log.error("❌ ERC-8004 identity belum terdaftar.")
                 raise
+
             if e.code == "OWNERSHIP_LOST":
-                log.error("❌ NFT ownership changed. Re-register identity.")
+                log.error("❌ NFT identity berubah / hilang.")
                 raise
+
             if e.code == "TOO_MANY_AGENTS_PER_IP":
-                log.error("❌ IP agent limit reached for this game")
+                log.error("❌ Terlalu banyak agent dari IP ini.")
                 raise
+
             if e.code == "ACCOUNT_ALREADY_IN_GAME":
-                log.info("Already in a game. Returning to heartbeat.")
+                log.info("Akun sudah ada di game. Kembali ke heartbeat.")
                 raise
-            log.warning("Join error: %s — retrying", e)
+
+            # ⚠️ SOFT ERROR (RETRY)
+            log.warning("Join error: %s — retrying...", e)
+            await asyncio.sleep(2)
+
+        except Exception as e:
+            # ❗ UNKNOWN ERROR
+            log.error("Unexpected error: %s", e)
+            await asyncio.sleep(2)
