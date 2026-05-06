@@ -1,7 +1,8 @@
 """
 Free game join via matchmaking queue.
-POST /join (Long Poll ~15s) → assigned → open WS immediately.
-Compatible with servers WITHOUT /join/status endpoint.
+- Compatible with server WITHOUT /join/status
+- Anti spam (delay adaptif)
+- Debug lengkap untuk deteksi suspend / shadow block
 """
 
 import asyncio
@@ -13,11 +14,12 @@ log = get_logger(__name__)
 
 async def join_free_game(api: MoltyAPI) -> tuple[str, str]:
     """
-    Enter free matchmaking queue and wait for assignment.
-    Returns (game_id, agent_id) when assigned.
+    Join free matchmaking queue (long polling).
+    Return (game_id, agent_id) jika berhasil.
     """
 
     attempt = 0
+    last_status = None
 
     while True:
         attempt += 1
@@ -26,59 +28,75 @@ async def join_free_game(api: MoltyAPI) -> tuple[str, str]:
         try:
             resp = await api.post_join("free")
 
+            # 🔍 DEBUG WAJIB
+            log.info("JOIN RESPONSE: %s", resp)
+
             # Safety check
             if not isinstance(resp, dict):
-                log.warning("Unexpected join response type: %s", type(resp).__name__)
-                await asyncio.sleep(1)
+                log.warning("Response bukan dict: %s", type(resp).__name__)
+                await asyncio.sleep(2)
                 continue
 
             status = resp.get("status", "")
 
-            # ✅ SUCCESS CASE
+            # ✅ BERHASIL MASUK GAME
             if status == "assigned":
-                game_id = resp.get("gameId", "")
-                agent_id = resp.get("agentId", "")
+                game_id = resp.get("gameId")
+                agent_id = resp.get("agentId")
 
                 if game_id and agent_id:
-                    log.info("✅ Assigned to free game: %s (agent=%s)", game_id, agent_id)
+                    log.info("✅ MASUK GAME: %s | agent=%s", game_id, agent_id)
                     return game_id, agent_id
 
-                log.warning("Assigned but missing IDs: %s", resp)
-                await asyncio.sleep(1)
+                log.warning("Assigned tapi data tidak lengkap: %s", resp)
+                await asyncio.sleep(2)
                 continue
 
-            # ⏳ STILL QUEUING
+            # ⏳ MASIH QUEUE
             if status in ("queued", "not_selected", ""):
-                log.debug("Queue status: %s — waiting...", status)
+                if status != last_status:
+                    log.info("Status queue: %s", status)
+                    last_status = status
+
+                # ⛔ DETEKSI SHADOW BLOCK
+                if attempt > 20:
+                    log.warning("⚠️ Sudah >20x belum masuk game")
+                    log.warning("Kemungkinan:")
+                    log.warning("1. Server sepi")
+                    log.warning("2. Akun kena limit / shadow block")
+                    log.warning("3. API key tidak eligible")
+
+                # delay biar tidak dianggap spam
+                await asyncio.sleep(2)
                 continue
 
-            # ⚠️ UNKNOWN RESPONSE
-            log.warning("Unexpected queue response: %s", resp)
-            await asyncio.sleep(1)
+            # ⚠️ RESPONSE ANEH
+            log.warning("Response tidak dikenal: %s", resp)
+            await asyncio.sleep(2)
 
         except APIError as e:
-            # ❌ HARD ERRORS (STOP)
+
+            # ❌ ERROR KRITIS
             if e.code == "NO_IDENTITY":
-                log.error("❌ ERC-8004 identity belum terdaftar.")
+                log.error("❌ Identity belum ada (ERC-8004)")
                 raise
 
             if e.code == "OWNERSHIP_LOST":
-                log.error("❌ NFT identity berubah / hilang.")
+                log.error("❌ NFT identity tidak valid / berubah")
                 raise
 
             if e.code == "TOO_MANY_AGENTS_PER_IP":
-                log.error("❌ Terlalu banyak agent dari IP ini.")
+                log.error("❌ Terlalu banyak bot di IP ini → kemungkinan suspend")
                 raise
 
             if e.code == "ACCOUNT_ALREADY_IN_GAME":
-                log.info("Akun sudah ada di game. Kembali ke heartbeat.")
+                log.info("Akun sudah di game → kembali ke heartbeat")
                 raise
 
-            # ⚠️ SOFT ERROR (RETRY)
-            log.warning("Join error: %s — retrying...", e)
-            await asyncio.sleep(2)
+            # ⚠️ ERROR NON-FATAL
+            log.warning("API Error: %s", e)
+            await asyncio.sleep(3)
 
         except Exception as e:
-            # ❗ UNKNOWN ERROR
             log.error("Unexpected error: %s", e)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
